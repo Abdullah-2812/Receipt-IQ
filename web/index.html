@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="Receipt IQ - Expense tracking app">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="Receipt IQ">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>Receipt IQ</title>
+  <link rel="manifest" href="manifest.json">
+
+  <style>
+    #loading {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      background: linear-gradient(135deg, #f5f5f5 0%, #e3f2fd 100%);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      z-index: 9999;
+    }
+    #loading.hidden { display: none; }
+    .spinner {
+      width: 48px;
+      height: 48px;
+      border: 4px solid #e0e0e0;
+      border-top-color: #2196F3;
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+    }
+    .loading-text {
+      margin-top: 20px;
+      color: #1976D2;
+      font-size: 18px;
+      font-weight: 500;
+    }
+    .loading-error {
+      color: #c62828;
+      margin-top: 12px;
+      font-size: 14px;
+      text-align: center;
+      padding: 0 24px;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <div id="loading">
+    <div class="spinner"></div>
+    <div class="loading-text">Loading Receipt IQ...</div>
+    <div id="loading-error" class="loading-error" style="display: none;"></div>
+  </div>
+
+  <script src="flutter_bootstrap.js" async></script>
+  <script>
+    (function() {
+      var loading = document.getElementById('loading');
+      var errorEl = document.getElementById('loading-error');
+      var hideTimeout = setTimeout(function() {
+        if (loading && !loading.classList.contains('hidden')) {
+          errorEl.style.display = 'block';
+          errorEl.textContent = 'Taking longer than usual. Please refresh the page.';
+        }
+      }, 15000);
+      window.addEventListener('flutter-first-frame', function() {
+        clearTimeout(hideTimeout);
+        if (loading) loading.classList.add('hidden');
+      });
+      setTimeout(function() {
+        if (loading && document.querySelector('flt-glass-pane') && !loading.classList.contains('hidden')) {
+          clearTimeout(hideTimeout);
+          loading.classList.add('hidden');
+        }
+      }, 500);
+      var checkCount = 0;
+      var checkReady = setInterval(function() {
+        checkCount++;
+        if (document.querySelector('flt-glass-pane') || document.querySelector('canvas')) {
+          clearTimeout(hideTimeout);
+          clearInterval(checkReady);
+          if (loading) loading.classList.add('hidden');
+        } else if (checkCount > 60) clearInterval(checkReady);
+      }, 500);
+    })();
+  </script>
+</body>
+</html>
