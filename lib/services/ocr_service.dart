@@ -1,7 +1,6 @@
 import 'dart:io';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import '../models/receipt_model.dart';
-import '../utils/constants.dart';
 import 'package:uuid/uuid.dart';
 
 class OCRService {

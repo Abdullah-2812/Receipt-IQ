@@ -66,11 +66,15 @@ class _HomeScreenState extends State<HomeScreen> {
             )
             .toList(),
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => setState(() => _selectedIndex = 2),
-        icon: const Icon(Icons.document_scanner),
-        label: Text(_isNarrowScreen ? 'Scan' : 'Scan Receipt'),
-      ),
+      // Hide on Upload tab: same index (2) makes taps look like "nothing happens"
+      // and the FAB would cover the gallery / camera buttons.
+      floatingActionButton: _selectedIndex == 2
+          ? null
+          : FloatingActionButton.extended(
+              onPressed: () => setState(() => _selectedIndex = 2),
+              icon: const Icon(Icons.document_scanner),
+              label: Text(_isNarrowScreen ? 'Scan' : 'Scan Receipt'),
+            ),
       floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
     );
   }

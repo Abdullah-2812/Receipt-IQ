@@ -1,12 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
+import 'bootstrap/ocr_template_bootstrap.dart';
 import 'utils/constants.dart';
 import 'screens/login_screen.dart';
 import 'screens/home_screen.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await OcrTemplateBootstrap.ensureBundledTemplates();
   runApp(const ReceiptIQApp());
 }
 
