@@ -4,10 +4,27 @@ class Receipt {
   final DateTime date;
   final double totalAmount;
   final String category;
-  final String? imagePath; // ? means optional
+  final String? imagePath;
   final List<ReceiptItem> items;
   final String? notes;
   final DateTime createdAt;
+
+  // Extended fields for Pakistani receipts
+  final String? rawOcrText;
+  final String? vendorAddress;
+  final String? receiptTime;
+  final double? subtotal;
+  final double? tax;
+  final double? fbrPosFee;
+  final double? discount;
+  final double? cashPaid;
+  final double? changeDue;
+  final String? paymentMethod;
+  final String? fbrInvoiceId;
+  final String? ntn;
+  final String? invoiceNumber;
+  final String? syncStatus;
+  final Map<String, dynamic>? categorySpecificData;
 
   Receipt({
     required this.id,
@@ -19,6 +36,21 @@ class Receipt {
     required this.items,
     this.notes,
     required this.createdAt,
+    this.rawOcrText,
+    this.vendorAddress,
+    this.receiptTime,
+    this.subtotal,
+    this.tax,
+    this.fbrPosFee,
+    this.discount,
+    this.cashPaid,
+    this.changeDue,
+    this.paymentMethod,
+    this.fbrInvoiceId,
+    this.ntn,
+    this.invoiceNumber,
+    this.syncStatus = 'local_only',
+    this.categorySpecificData,
   });
 
   // Convert Receipt to Map (for database storage)
@@ -32,6 +64,21 @@ class Receipt {
       'imagePath': imagePath,
       'notes': notes,
       'createdAt': createdAt.toIso8601String(),
+      'rawOcrText': rawOcrText,
+      'vendorAddress': vendorAddress,
+      'receiptTime': receiptTime,
+      'subtotal': subtotal,
+      'tax': tax,
+      'fbrPosFee': fbrPosFee,
+      'discount': discount,
+      'cashPaid': cashPaid,
+      'changeDue': changeDue,
+      'paymentMethod': paymentMethod,
+      'fbrInvoiceId': fbrInvoiceId,
+      'ntn': ntn,
+      'invoiceNumber': invoiceNumber,
+      'syncStatus': syncStatus,
+      'categorySpecificData': categorySpecificData?.toString(),
     };
   }
 
@@ -44,16 +91,30 @@ class Receipt {
       totalAmount: (map['totalAmount'] as num).toDouble(),
       category: map['category'] as String,
       imagePath: map['imagePath'] as String?,
-      items: [], // Will load separately
+      items: [], // Loaded separately by DatabaseService
       notes: map['notes'] as String?,
       createdAt: DateTime.parse(map['createdAt'] as String),
+      rawOcrText: map['rawOcrText'] as String?,
+      vendorAddress: map['vendorAddress'] as String?,
+      receiptTime: map['receiptTime'] as String?,
+      subtotal: (map['subtotal'] as num?)?.toDouble(),
+      tax: (map['tax'] as num?)?.toDouble(),
+      fbrPosFee: (map['fbrPosFee'] as num?)?.toDouble(),
+      discount: (map['discount'] as num?)?.toDouble(),
+      cashPaid: (map['cashPaid'] as num?)?.toDouble(),
+      changeDue: (map['changeDue'] as num?)?.toDouble(),
+      paymentMethod: map['paymentMethod'] as String?,
+      fbrInvoiceId: map['fbrInvoiceId'] as String?,
+      ntn: map['ntn'] as String?,
+      invoiceNumber: map['invoiceNumber'] as String?,
+      syncStatus: (map['syncStatus'] as String?) ?? 'local_only',
     );
   }
 }
 
 class ReceiptItem {
   final String name;
-  final int quantity;
+  final double quantity; // double to support weight-based items (e.g. 0.135 kg)
   final double price;
   final double totalPrice;
 
@@ -76,7 +137,7 @@ class ReceiptItem {
   factory ReceiptItem.fromMap(Map<String, dynamic> map) {
     return ReceiptItem(
       name: map['name'] as String,
-      quantity: map['quantity'] as int,
+      quantity: (map['quantity'] as num).toDouble(),
       price: (map['price'] as num).toDouble(),
       totalPrice: (map['totalPrice'] as num).toDouble(),
     );

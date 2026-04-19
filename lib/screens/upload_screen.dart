@@ -8,6 +8,8 @@ import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart
 
 import '../utils/constants.dart';
 import '../ocr/ocr_engine.dart';
+import '../services/receipt_classifier_service.dart';
+import '../services/receipt_parser_service.dart';
 
 class UploadScreen extends StatefulWidget {
   const UploadScreen({super.key});
@@ -21,17 +23,30 @@ class _UploadScreenState extends State<UploadScreen> {
   final _labelController = TextEditingController();
   late OcrEngine _engine;
   late final Future<void> _engineFuture;
+  late ReceiptClassifierService _classifier;
+  late final Future<void> _classifierFuture;
+  final _parser = ReceiptParserService();
 
   File? _selectedImage;
   OcrResult? _result;
+  ClassificationResult? _classification;
+  ParsedReceipt? _parsedReceipt;
   bool _isProcessing = false;
   bool _isEngineReady = false;
+  bool _isClassifierReady = false;
   int _templateCount = 0;
 
   @override
   void initState() {
     super.initState();
     _engineFuture = _initEngine();
+    _classifierFuture = _initClassifier();
+  }
+
+  Future<void> _initClassifier() async {
+    _classifier = ReceiptClassifierService();
+    await _classifier.initialize();
+    if (mounted) setState(() => _isClassifierReady = true);
   }
 
   /// Always assigns [_engine] so [_pickImage] never hits a [LateInitializationError],
@@ -93,9 +108,14 @@ class _UploadScreenState extends State<UploadScreen> {
       _selectedImage = File(picked.path);
       _isProcessing = true;
       _result = null;
+      _classification = null;
+      _parsedReceipt = null;
     });
 
     // ── Step 1: ML Kit (Latin); fall back to k-NN if empty or error ─────
+    String? ocrText;
+    OcrResult ocrResult;
+
     final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
     try {
       final inputImage = InputImage.fromFile(_selectedImage!);
@@ -103,41 +123,64 @@ class _UploadScreenState extends State<UploadScreen> {
       debugPrint('ML Kit result: ${recognized.text}');
       final text = recognized.text.trim();
       if (text.isNotEmpty) {
-        if (!mounted) return;
-        setState(() {
-          _result = OcrResult(
-            text: recognized.text,
-            lines: recognized.text.split('\n'),
-            success: true,
-          );
-          _isProcessing = false;
-        });
-        return;
+        ocrText = recognized.text;
+        ocrResult = OcrResult(
+          text: recognized.text,
+          lines: recognized.text.split('\n'),
+          success: true,
+        );
+      } else {
+        ocrResult = OcrResult(text: '', lines: [], success: true);
       }
     } catch (e) {
       debugPrint('ML Kit error: $e');
-      // Fall through to traditional OCR
+      ocrResult = OcrResult(text: '', lines: [], success: false);
     } finally {
       await recognizer.close();
     }
 
     // ── Step 2: Fallback to custom k-NN pipeline ──────────────────────────
-    OcrResult result;
-    try {
-      result = await _engine.recognize(_selectedImage!);
-    } catch (e) {
-      result = OcrResult(
-        text: '',
-        lines: [],
-        success: false,
-        error: e.toString(),
-      );
+    if (ocrText == null || ocrText.isEmpty) {
+      try {
+        ocrResult = await _engine.recognize(_selectedImage!);
+        if (ocrResult.success && ocrResult.text.trim().isNotEmpty) {
+          ocrText = ocrResult.text;
+        }
+      } catch (e) {
+        ocrResult = OcrResult(
+          text: '',
+          lines: [],
+          success: false,
+          error: e.toString(),
+        );
+      }
+    }
+
+    // ── Step 3: Classify + Parse ──────────────────────────────────────────
+    ClassificationResult? classification;
+    ParsedReceipt? parsedReceipt;
+
+    if (ocrText != null && ocrText.isNotEmpty) {
+      try {
+        await _classifierFuture;
+        classification = _classifier.classify(ocrText);
+        debugPrint(
+          'Classifier → category: ${classification.category}  '
+          'confidence: ${(classification.confidence * 100).toStringAsFixed(1)}%  '
+          'useFallback: ${classification.useFallback}',
+        );
+        parsedReceipt = _parser.parse(ocrText, classification.category);
+      } catch (e) {
+        debugPrint('Classify/parse error: $e');
+      }
     }
 
     if (!mounted) return;
     setState(() {
       _isProcessing = false;
-      _result = result;
+      _result = ocrResult;
+      _classification = classification;
+      _parsedReceipt = parsedReceipt;
     });
   }
 
@@ -389,6 +432,136 @@ class _UploadScreenState extends State<UploadScreen> {
               ),
             ),
           ],
+
+          // ── Parsed Receipt ────────────────────────────────────────────────
+          if (_parsedReceipt != null && !_isProcessing) ...[
+            const SizedBox(height: 16),
+            Card(
+              color: _parsedReceipt!.extractionFailed
+                  ? const Color(0xFFFFF3E0)
+                  : const Color(0xFFE8F5E9),
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(
+                          _parsedReceipt!.extractionFailed
+                              ? Icons.warning_amber_rounded
+                              : Icons.check_circle_outline,
+                          color: _parsedReceipt!.extractionFailed
+                              ? Colors.orange
+                              : Colors.green,
+                          size: 18,
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          'Parsed Receipt',
+                          style:
+                              Theme.of(context).textTheme.titleSmall?.copyWith(
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                        ),
+                      ],
+                    ),
+                    const Divider(height: 16),
+                    if (_classification != null)
+                      _infoRow(
+                        'Category',
+                        '${_classification!.category}  '
+                            '(${(_classification!.confidence * 100).toStringAsFixed(1)}%)',
+                      ),
+                    if (_parsedReceipt!.vendorName != null)
+                      _infoRow('Merchant', _parsedReceipt!.vendorName!),
+                    if (_parsedReceipt!.vendorAddress != null)
+                      _infoRow('Address', _parsedReceipt!.vendorAddress!),
+                    if (_parsedReceipt!.receiptDate != null)
+                      _infoRow(
+                        'Date',
+                        '${_parsedReceipt!.receiptDate!.day}/'
+                            '${_parsedReceipt!.receiptDate!.month}/'
+                            '${_parsedReceipt!.receiptDate!.year}',
+                      ),
+                    if (_parsedReceipt!.receiptTime != null)
+                      _infoRow('Time', _parsedReceipt!.receiptTime!),
+                    if (_parsedReceipt!.invoiceNumber != null)
+                      _infoRow('Invoice #', _parsedReceipt!.invoiceNumber!),
+                    if (_parsedReceipt!.paymentMethod != null)
+                      _infoRow('Payment', _parsedReceipt!.paymentMethod!),
+                    if (_parsedReceipt!.subtotal != null)
+                      _infoRow('Subtotal',
+                          'Rs. ${_parsedReceipt!.subtotal!.toStringAsFixed(2)}'),
+                    if (_parsedReceipt!.tax != null)
+                      _infoRow('Tax',
+                          'Rs. ${_parsedReceipt!.tax!.toStringAsFixed(2)}'),
+                    if (_parsedReceipt!.fbrPosFee != null)
+                      _infoRow('FBR POS Fee',
+                          'Rs. ${_parsedReceipt!.fbrPosFee!.toStringAsFixed(2)}'),
+                    if (_parsedReceipt!.discount != null)
+                      _infoRow('Discount',
+                          'Rs. ${_parsedReceipt!.discount!.toStringAsFixed(2)}'),
+                    if (_parsedReceipt!.total != null)
+                      _infoRow(
+                        'Total',
+                        'Rs. ${_parsedReceipt!.total!.toStringAsFixed(2)}',
+                        bold: true,
+                      ),
+                    if (_parsedReceipt!.cashPaid != null)
+                      _infoRow('Cash Paid',
+                          'Rs. ${_parsedReceipt!.cashPaid!.toStringAsFixed(2)}'),
+                    if (_parsedReceipt!.changeDue != null)
+                      _infoRow('Change Due',
+                          'Rs. ${_parsedReceipt!.changeDue!.toStringAsFixed(2)}'),
+                    if (_parsedReceipt!.ntn != null)
+                      _infoRow('NTN', _parsedReceipt!.ntn!),
+                    if (_parsedReceipt!.fbrInvoiceId != null)
+                      _infoRow('FBR Invoice', _parsedReceipt!.fbrInvoiceId!),
+                    if (_parsedReceipt!.items.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        'Items (${_parsedReceipt!.items.length})',
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodySmall
+                            ?.copyWith(fontWeight: FontWeight.w600),
+                      ),
+                      const SizedBox(height: 4),
+                      ..._parsedReceipt!.items.map(
+                        (item) => Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 2),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  '${item.quantity}x ${item.name}',
+                                  style: const TextStyle(fontSize: 12),
+                                ),
+                              ),
+                              Text(
+                                'Rs. ${item.itemTotal.toStringAsFixed(2)}',
+                                style: const TextStyle(fontSize: 12),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                    if (_parsedReceipt!.extractionFailed)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text(
+                          'Extraction incomplete — Claude fallback will be added later.',
+                          style: TextStyle(
+                              fontSize: 12, color: Colors.orange.shade800),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -449,6 +622,37 @@ class _UploadScreenState extends State<UploadScreen> {
     );
   }
 
+  Widget _infoRow(String label, String value, {bool bold = false}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 110,
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: 12,
+                color: AppColors.textSecondary,
+                fontWeight: bold ? FontWeight.w600 : FontWeight.normal,
+              ),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: bold ? FontWeight.w700 : FontWeight.normal,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _showSnack(String msg) {
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(msg)));
@@ -457,6 +661,7 @@ class _UploadScreenState extends State<UploadScreen> {
   @override
   void dispose() {
     _labelController.dispose();
+    if (_isClassifierReady) _classifier.dispose();
     super.dispose();
   }
 }

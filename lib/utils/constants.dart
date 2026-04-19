@@ -29,6 +29,18 @@ class AppColors {
   static const Color textHint = Color(0xFFBDBDBD); // Light gray
 }
 
+// Maps classifier model output labels → app category strings
+class ClassifierCategoryMap {
+  static const Map<String, String> labelToCategory = {
+    'atm': 'ATM',
+    'food': 'Food & Dining',
+    'grocery': 'Groceries',
+    'pos_fuel': 'Fuel',
+    'pos_store': 'Shopping',
+    'store': 'Shopping',
+  };
+}
+
 // Expense Categories
 class ExpenseCategories {
   static const List<String> categories = [
