@@ -8,7 +8,9 @@
     <application
         android:label="receipt_iq"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:allowBackup="false"
+        android:fullBackupContent="false">
 
          <!-- Add this -->
         <provider

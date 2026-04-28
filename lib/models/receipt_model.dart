@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 class Receipt {
   final String id;
   final String merchantName;
@@ -53,6 +55,18 @@ class Receipt {
     this.categorySpecificData,
   });
 
+  // Only the 8 columns that exist in the current DB schema.
+  Map<String, dynamic> toDbMap() => {
+        'id': id,
+        'merchantName': merchantName,
+        'date': date.toIso8601String(),
+        'totalAmount': totalAmount,
+        'category': category,
+        'imagePath': imagePath,
+        'notes': notes,
+        'createdAt': createdAt.toIso8601String(),
+      };
+
   // Convert Receipt to Map (for database storage)
   Map<String, dynamic> toMap() {
     return {
@@ -78,7 +92,8 @@ class Receipt {
       'ntn': ntn,
       'invoiceNumber': invoiceNumber,
       'syncStatus': syncStatus,
-      'categorySpecificData': categorySpecificData?.toString(),
+      'categorySpecificData':
+          categorySpecificData != null ? jsonEncode(categorySpecificData) : null,
     };
   }
 
@@ -108,6 +123,10 @@ class Receipt {
       ntn: map['ntn'] as String?,
       invoiceNumber: map['invoiceNumber'] as String?,
       syncStatus: (map['syncStatus'] as String?) ?? 'local_only',
+      categorySpecificData: map['categorySpecificData'] != null
+          ? Map<String, dynamic>.from(
+              jsonDecode(map['categorySpecificData'] as String) as Map)
+          : null,
     );
   }
 }

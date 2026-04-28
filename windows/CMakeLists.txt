@@ -10,6 +10,10 @@ set(BINARY_NAME "receipt_iq")
 # versions of CMake.
 cmake_policy(VERSION 3.14...3.25)
 
+# Firebase C++ SDK declares cmake_minimum_required < 3.5 which newer CMake
+# refuses to support. This sets 3.5 as the floor for all subdirectories.
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+
 # Define build configuration option.
 get_property(IS_MULTICONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
 if(IS_MULTICONFIG)
@@ -48,6 +52,10 @@ endfunction()
 # Flutter library and tool build rules.
 set(FLUTTER_MANAGED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/flutter")
 add_subdirectory(${FLUTTER_MANAGED_DIR})
+
+# TFLite DLL path — must be set before add_subdirectory("runner") so that
+# runner/CMakeLists.txt can reference it in add_custom_command.
+set(TFLITE_DLL "${CMAKE_CURRENT_SOURCE_DIR}/../blobs/libtensorflowlite_c-win.dll")
 
 # Application build; see runner/CMakeLists.txt.
 add_subdirectory("runner")
@@ -106,3 +114,12 @@ install(DIRECTORY "${PROJECT_BUILD_DIR}/${FLUTTER_ASSET_DIR_NAME}"
 install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   CONFIGURATIONS Profile;Release
   COMPONENT Runtime)
+
+# TFLite DLL — install into release bundles.
+# The POST_BUILD copy command lives in runner/CMakeLists.txt (where the
+# target is defined) so it can run during flutter run -d windows.
+if(EXISTS "${TFLITE_DLL}")
+  install(FILES "${TFLITE_DLL}"
+    DESTINATION "${CMAKE_INSTALL_PREFIX}/blobs"
+    COMPONENT Runtime)
+endif()

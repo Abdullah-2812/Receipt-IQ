@@ -38,3 +38,16 @@ target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # Run the Flutter tool portions of the build. This must not be removed.
 add_dependencies(${BINARY_NAME} flutter_assemble)
+
+# TFLite DLL — copy next to the exe on every build (required for flutter run -d windows).
+if(EXISTS "${TFLITE_DLL}")
+  add_custom_command(
+    TARGET ${BINARY_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+      "$<TARGET_FILE_DIR:${BINARY_NAME}>/blobs"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${TFLITE_DLL}"
+      "$<TARGET_FILE_DIR:${BINARY_NAME}>/blobs/libtensorflowlite_c-win.dll"
+    COMMENT "Copying TFLite DLL to build output"
+  )
+endif()

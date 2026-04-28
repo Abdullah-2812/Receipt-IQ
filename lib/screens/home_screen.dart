@@ -1,6 +1,8 @@
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import '../utils/constants.dart';
+import 'classifier_accuracy_screen.dart';
 import 'dashboard_screen.dart';
 import 'receipts_list_screen.dart';
 import 'upload_screen.dart';
@@ -15,6 +17,8 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   int _selectedIndex = 0;
+  int _dashboardVersion = 0;
+  int _receiptsVersion = 0;
 
   bool get _isNarrowScreen =>
       MediaQuery.sizeOf(context).width < 400;
@@ -42,17 +46,21 @@ class _HomeScreenState extends State<HomeScreen> {
       body: SafeArea(
         child: IndexedStack(
           index: _selectedIndex,
-          children: const [
-            DashboardScreen(),
-            ReceiptsListScreen(),
-            UploadScreen(),
-            AnalyticsScreen(),
+          children: [
+            DashboardScreen(key: ValueKey(_dashboardVersion)),
+            ReceiptsListScreen(key: ValueKey(_receiptsVersion)),
+            const UploadScreen(),
+            const AnalyticsScreen(),
           ],
         ),
       ),
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _selectedIndex,
-        onTap: (index) => setState(() => _selectedIndex = index),
+        onTap: (index) => setState(() {
+              if (index == 0) _dashboardVersion++;
+              if (index == 1) _receiptsVersion++;
+              _selectedIndex = index;
+            }),
         selectedItemColor: AppColors.primary,
         unselectedItemColor: AppColors.textSecondary,
         type: BottomNavigationBarType.fixed,
@@ -139,6 +147,22 @@ class _HomeScreenState extends State<HomeScreen> {
                   const Divider(),
                   ListTile(
                     leading: const Icon(
+                      Icons.science_outlined,
+                      color: AppColors.textSecondary,
+                    ),
+                    title: const Text('Classifier Accuracy Test'),
+                    onTap: () {
+                      Navigator.of(context).pop();
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => const ClassifierAccuracyScreen(),
+                        ),
+                      );
+                    },
+                  ),
+                  const Divider(),
+                  ListTile(
+                    leading: const Icon(
                       Icons.logout_outlined,
                       color: AppColors.textSecondary,
                     ),
@@ -148,9 +172,12 @@ class _HomeScreenState extends State<HomeScreen> {
                         color: AppColors.textPrimary,
                       ),
                     ),
-                    onTap: () {
+                    onTap: () async {
                       Navigator.of(context).pop();
-                      Navigator.of(context).pushReplacementNamed('/');
+                      await FirebaseAuth.instance.signOut();
+                      // AuthWrapper automatically redirects to LoginScreen.
+                      // SQLite is preserved — handleLogin on next login decides
+                      // whether to wipe based on whether the UID changed.
                     },
                   ),
                 ],

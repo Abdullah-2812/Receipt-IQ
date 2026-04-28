@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
@@ -8,8 +9,13 @@ import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart
 
 import '../utils/constants.dart';
 import '../ocr/ocr_engine.dart';
+import '../models/receipt_model.dart';
+import '../services/database_service.dart';
+import '../services/fallback_service.dart';
+import '../services/sync_service.dart';
 import '../services/receipt_classifier_service.dart';
 import '../services/receipt_parser_service.dart';
+import '../widgets/classifier_debug_card.dart';
 
 class UploadScreen extends StatefulWidget {
   const UploadScreen({super.key});
@@ -20,7 +26,6 @@ class UploadScreen extends StatefulWidget {
 
 class _UploadScreenState extends State<UploadScreen> {
   final _picker = ImagePicker();
-  final _labelController = TextEditingController();
   late OcrEngine _engine;
   late final Future<void> _engineFuture;
   late ReceiptClassifierService _classifier;
@@ -34,7 +39,10 @@ class _UploadScreenState extends State<UploadScreen> {
   bool _isProcessing = false;
   bool _isEngineReady = false;
   bool _isClassifierReady = false;
-  int _templateCount = 0;
+  bool _isSaving = false;
+  bool _saved = false;
+  // debug only — set to null to clear, never used in release builds
+  Map<String, double>? _classifierScores;
 
   @override
   void initState() {
@@ -70,10 +78,64 @@ class _UploadScreenState extends State<UploadScreen> {
       }
     }
     if (mounted) {
-      setState(() {
-        _isEngineReady = true;
-        _templateCount = _engine.templateCount;
-      });
+      setState(() => _isEngineReady = true);
+    }
+  }
+
+  Future<void> _saveReceipt() async {
+    if (_parsedReceipt == null) return;
+    setState(() => _isSaving = true);
+
+    final parsed = _parsedReceipt!;
+    final category = ClassifierCategoryMap.labelToCategory[
+            _classification?.category ?? ''] ??
+        'Other';
+    final total = parsed.total ??
+        parsed.categoryData['amount'] as double? ??
+        0.0;
+    final id = 'receipt_${DateTime.now().millisecondsSinceEpoch}';
+
+    final receipt = Receipt(
+      id: id,
+      merchantName: parsed.vendorName?.isNotEmpty == true
+          ? parsed.vendorName!
+          : 'Unknown Merchant',
+      date: parsed.receiptDate ?? DateTime.now(),
+      totalAmount: total,
+      category: category,
+      imagePath: _selectedImage?.path,
+      items: parsed.items
+          .map((i) => ReceiptItem(
+                name: i.name,
+                quantity: i.quantity,
+                price: i.unitPrice,
+                totalPrice: i.itemTotal,
+              ))
+          .toList(),
+      createdAt: DateTime.now(),
+      rawOcrText: _result?.text,
+      vendorAddress: parsed.vendorAddress,
+      receiptTime: parsed.receiptTime,
+      subtotal: parsed.subtotal,
+      tax: parsed.tax,
+      fbrPosFee: parsed.fbrPosFee,
+      discount: parsed.discount,
+      cashPaid: parsed.cashPaid,
+      changeDue: parsed.changeDue,
+      paymentMethod: parsed.paymentMethod,
+      fbrInvoiceId: parsed.fbrInvoiceId,
+      ntn: parsed.ntn,
+      invoiceNumber: parsed.invoiceNumber,
+    );
+
+    await DatabaseService.instance.insertReceipt(receipt);
+    SyncService.instance.pushPending();
+
+    if (mounted) {
+      setState(() { _isSaving = false; _saved = true; });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Receipt saved successfully')),
+      );
     }
   }
 
@@ -104,12 +166,24 @@ class _UploadScreenState extends State<UploadScreen> {
     );
     if (picked == null) return;
 
+    // Camera always produces JPEG; gallery may return other formats
+    if (source == ImageSource.gallery) {
+      final ext = picked.path.split('.').last.toLowerCase();
+      const allowed = {'jpg', 'jpeg', 'png'};
+      if (!allowed.contains(ext)) {
+        _showSnack('Unsupported file type ".$ext". Please upload a JPG or PNG image.');
+        return;
+      }
+    }
+
     setState(() {
       _selectedImage = File(picked.path);
       _isProcessing = true;
       _result = null;
       _classification = null;
       _parsedReceipt = null;
+      _classifierScores = null;
+      _saved = false;
     });
 
     // ── Step 1: ML Kit (Latin); fall back to k-NN if empty or error ─────
@@ -163,13 +237,24 @@ class _UploadScreenState extends State<UploadScreen> {
     if (ocrText != null && ocrText.isNotEmpty) {
       try {
         await _classifierFuture;
-        classification = _classifier.classify(ocrText);
+        final allScores = _classifier.classifyAll(ocrText);
+        if (kDebugMode) _classifierScores = allScores;
+        final top = allScores.entries.first;
+        classification = ClassificationResult(
+          category: top.key,
+          confidence: top.value,
+          useFallback: top.value < ReceiptClassifierService.confidenceThreshold,
+        );
         debugPrint(
           'Classifier → category: ${classification.category}  '
           'confidence: ${(classification.confidence * 100).toStringAsFixed(1)}%  '
           'useFallback: ${classification.useFallback}',
         );
         parsedReceipt = _parser.parse(ocrText, classification.category);
+        if (parsedReceipt.extractionFailed) {
+          debugPrint('Local parser failed — trying Gemini fallback');
+          parsedReceipt = await GeminiFallbackService().parse(ocrText, classification.category);
+        }
       } catch (e) {
         debugPrint('Classify/parse error: $e');
       }
@@ -182,70 +267,6 @@ class _UploadScreenState extends State<UploadScreen> {
       _classification = classification;
       _parsedReceipt = parsedReceipt;
     });
-  }
-
-  Future<void> _addTrainingSample() async {
-    await _engineFuture;
-    final label = _labelController.text.trim();
-    if (label.isEmpty) {
-      _showSnack('Type the character this image shows (one letter or digit)');
-      return;
-    }
-    if (label.length != 1) {
-      _showSnack('Use exactly one character per sample (e.g. A, 7, \$)');
-      return;
-    }
-
-    PermissionStatus status;
-    if (await Permission.photos.request().isGranted) {
-      status = PermissionStatus.granted;
-    } else {
-      status = await Permission.storage.request();
-    }
-    if (!status.isGranted) {
-      _showSnack('Permission denied — allow Photos in settings');
-      return;
-    }
-
-    final picked = await _picker.pickImage(
-      source: ImageSource.gallery,
-      imageQuality: 90,
-    );
-    if (picked == null) return;
-
-    final before = _engine.templateCount;
-    setState(() => _isProcessing = true);
-    try {
-      await _engine.trainWithSample(File(picked.path), label);
-    } catch (e) {
-      if (mounted) _showSnack('Training failed: $e');
-    }
-    if (!mounted) return;
-    final after = _engine.templateCount;
-    setState(() {
-      _isProcessing = false;
-      _templateCount = after;
-    });
-    if (after > before) {
-      _showSnack(
-        'Saved “$label” — $after template(s). You can scan a receipt now.',
-      );
-    } else if (mounted) {
-      _showSnack(
-        'No new template saved — crop one clear character (high contrast) and try again',
-      );
-    }
-  }
-
-  Future<void> _clearTraining() async {
-    await _engineFuture;
-    await _engine.clearTemplates();
-    if (!mounted) return;
-    setState(() {
-      _templateCount = 0;
-      _result = null;
-    });
-    _showSnack('Training data cleared');
   }
 
   @override
@@ -286,70 +307,6 @@ class _UploadScreenState extends State<UploadScreen> {
                   ),
             ),
             const SizedBox(height: 16),
-          ],
-
-          if (_isEngineReady) ...[
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            'Train OCR (k-NN)',
-                            style: Theme.of(context)
-                                .textTheme
-                                .titleSmall
-                                ?.copyWith(fontWeight: FontWeight.w600),
-                          ),
-                        ),
-                        if (_templateCount > 0)
-                          IconButton(
-                            icon: const Icon(Icons.delete_outline, size: 22),
-                            tooltip: 'Clear all training',
-                            onPressed:
-                                _isProcessing ? null : _clearTraining,
-                          ),
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      'This engine matches shapes to labels you provide. Add one clear photo per character (cropped), then scan receipts that use the same font style.',
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: AppColors.textSecondary,
-                          ),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: _labelController,
-                      maxLength: 1,
-                      textCapitalization: TextCapitalization.characters,
-                      decoration: const InputDecoration(
-                        labelText: 'Character on next image',
-                        hintText: 'e.g. A, 3',
-                        border: OutlineInputBorder(),
-                        counterText: '',
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    OutlinedButton.icon(
-                      onPressed:
-                          _isProcessing ? null : _addTrainingSample,
-                      icon: const Icon(Icons.add_photo_alternate_outlined),
-                      label: Text(
-                        _templateCount == 0
-                            ? 'Add training image from gallery'
-                            : 'Add another ($_templateCount saved)',
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 24),
           ],
 
           // ── Upload Zone ──────────────────────────────────────────────────
@@ -431,6 +388,12 @@ class _UploadScreenState extends State<UploadScreen> {
                 ),
               ),
             ),
+          ],
+
+          // ── Classifier Debug (debug builds only) ─────────────────────────
+          if (kDebugMode && _classifierScores != null && !_isProcessing) ...[
+            const SizedBox(height: 16),
+            ClassifierDebugCard(scores: _classifierScores!),
           ],
 
           // ── Parsed Receipt ────────────────────────────────────────────────
@@ -552,7 +515,7 @@ class _UploadScreenState extends State<UploadScreen> {
                       Padding(
                         padding: const EdgeInsets.only(top: 8),
                         child: Text(
-                          'Extraction incomplete — Claude fallback will be added later.',
+                          'Extraction incomplete — some fields could not be parsed.',
                           style: TextStyle(
                               fontSize: 12, color: Colors.orange.shade800),
                         ),
@@ -561,6 +524,36 @@ class _UploadScreenState extends State<UploadScreen> {
                 ),
               ),
             ),
+            const SizedBox(height: 12),
+            _saved
+                ? Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: const [
+                      Icon(Icons.check_circle, color: Colors.green, size: 20),
+                      SizedBox(width: 6),
+                      Text('Saved to receipts',
+                          style: TextStyle(color: Colors.green, fontWeight: FontWeight.w600)),
+                    ],
+                  )
+                : FilledButton.icon(
+                    onPressed: _isSaving ? null : _saveReceipt,
+                    icon: _isSaving
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                                strokeWidth: 2, color: Colors.white),
+                          )
+                        : const Icon(Icons.save_outlined),
+                    label: Text(_isSaving ? 'Saving…' : 'Save Receipt'),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: AppColors.accent,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12)),
+                    ),
+                  ),
           ],
         ],
       ),
@@ -660,7 +653,6 @@ class _UploadScreenState extends State<UploadScreen> {
 
   @override
   void dispose() {
-    _labelController.dispose();
     if (_isClassifierReady) _classifier.dispose();
     super.dispose();
   }

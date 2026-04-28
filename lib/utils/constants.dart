@@ -6,6 +6,20 @@ class AppConstants {
   static const String appVersion = '1.0.0';
 }
 
+// Backend API endpoint. Single source of truth — every API client
+// (sync, analytics, future endpoints) reads from here. Swap this one
+// line when changing networks or pointing at ngrok for demos.
+class ApiConfig {
+  // Public ngrok URL — works on any network (WiFi, cellular).
+  // Tunnel is opened with:
+  //   ngrok http --domain=ninetieth-zestfully-lid.ngrok-free.dev 8000
+  // See D:\receipt_iq_backend\NGROK_SETUP.txt for full instructions.
+  static const String baseUrl = 'https://ninetieth-zestfully-lid.ngrok-free.dev';
+
+  // Laptop LAN IP — uncomment for same-WiFi local dev when ngrok is off.
+  // static const String baseUrl = 'http://192.168.100.47:8000';
+}
+
 // App Colors
 class AppColors {
   // Primary Colors
@@ -29,53 +43,49 @@ class AppColors {
   static const Color textHint = Color(0xFFBDBDBD); // Light gray
 }
 
-// Maps classifier model output labels → app category strings
+// Maps classifier model output labels → app category strings.
+// Six labels in, six categories out — every classifier output has a
+// matching entry in ExpenseCategories.categories below.
 class ClassifierCategoryMap {
   static const Map<String, String> labelToCategory = {
-    'atm': 'ATM',
-    'food': 'Food & Dining',
-    'grocery': 'Groceries',
-    'pos_fuel': 'Fuel',
+    'atm':       'Cash & ATM',
+    'food':      'Food & Dining',
+    'grocery':   'Groceries',
+    'pos_fuel':  'Fuel',
     'pos_store': 'Shopping',
-    'store': 'Shopping',
+    'store':     'Shopping',
   };
 }
 
-// Expense Categories
+// Expense Categories — six labels, each one mappable from a classifier
+// output (Shopping covers both pos_store and store). 'Other' is the
+// manual / fallback bucket when classification confidence is low.
 class ExpenseCategories {
   static const List<String> categories = [
     'Food & Dining',
     'Groceries',
-    'Transportation',
+    'Fuel',
     'Shopping',
-    'Bills & Utilities',
-    'Medicines',
-    'Entertainment',
+    'Cash & ATM',
     'Other',
   ];
-  
-  // Category colors for charts
+
   static const Map<String, Color> categoryColors = {
     'Food & Dining': Color(0xFFFF6B6B),
-    'Groceries': Color(0xFF4ECDC4),
-    'Transportation': Color(0xFFFFE66D),
-    'Shopping': Color(0xFF95E1D3),
-    'Bills & Utilities': Color(0xFFF38181),
-    'Medicines': Color(0xFFAA96DA),
-    'Entertainment': Color(0xFFFCBF49),
-    'Other': Color(0xFF9E9E9E),
+    'Groceries':     Color(0xFF4ECDC4),
+    'Fuel':          Color(0xFFFFE66D),
+    'Shopping':      Color(0xFF95E1D3),
+    'Cash & ATM':    Color(0xFFF38181),
+    'Other':         Color(0xFF9E9E9E),
   };
-  
-  // Category icons
+
   static const Map<String, IconData> categoryIcons = {
     'Food & Dining': Icons.restaurant,
-    'Groceries': Icons.shopping_cart,
-    'Transportation': Icons.directions_car,
-    'Shopping': Icons.shopping_bag,
-    'Bills & Utilities': Icons.receipt_long,
-    'Medicines': Icons.medical_services,
-    'Entertainment': Icons.movie,
-    'Other': Icons.more_horiz,
+    'Groceries':     Icons.shopping_cart,
+    'Fuel':          Icons.local_gas_station,
+    'Shopping':      Icons.shopping_bag,
+    'Cash & ATM':    Icons.atm,
+    'Other':         Icons.more_horiz,
   };
 }
 
@@ -90,7 +100,7 @@ class DateFormats {
 // Database Constants
 class DatabaseConstants {
   static const String databaseName = 'receipt_iq.db';
-  static const int databaseVersion = 1;
+  static const int databaseVersion = 4;
   
   // Table names
   static const String receiptsTable = 'receipts';

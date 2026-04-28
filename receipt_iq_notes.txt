@@ -1,0 +1,487 @@
+================================================================================
+  RECEIPT IQ — PROJECT NOTES
+  Generated: 2026-04-24
+================================================================================
+
+
+────────────────────────────────────────────────────────────────────────────────
+1. CLASSIFIER — TF-IDF + NAIVE BAYES (TFLite)
+────────────────────────────────────────────────────────────────────────────────
+
+HOW IT WORKS
+  - Trained in Python: TF-IDF vectorizer (3000 features, unigrams + bigrams,
+    sublinear_tf=True) → Multinomial Naive Bayes → 6 classes:
+      atm, food, grocery, pos_fuel, pos_store, store
+  - Converted to TFLite for on-device Dart inference.
+  - In Dart (receipt_classifier_service.dart):
+      1. Tokenize OCR text → count unigrams + bigrams
+      2. Apply TF-IDF weights (same vocab/IDF as Python training)
+      3. Build Float32List[3000] input tensor
+      4. Run TFLite interpreter → raw logits [1 × 6]
+      5. Apply softmax → probability distribution summing to 1.0
+      6. Return argmax as predicted category + its softmax score as confidence
+
+WHY THE CONFIDENCE SHOWS ~32%
+  - 32% is the real softmax probability for the top class on your receipts.
+  - With 6 classes, random guessing = 16.7%. So 32% means the model is roughly
+    twice as confident as random — it has a signal but is genuinely uncertain.
+  - This uncertainty is normal: OCR output from phone cameras contains character
+    errors, spacing issues, and partial lines. The model was trained on cleaner
+    training data, so noisy OCR reduces its separation between classes.
+  - The confidence score ≠ the accuracy on the test set. The model may classify
+    correctly more often than 32% of the time; the score just reflects how
+    spread the probability is across the 6 classes (a flat distribution =
+    low confidence even when the prediction is right).
+
+WHY IT SHOWED 100% BEFORE AND REVERTED
+  - At some point in a previous session, the extracted receipt card was showing
+    100% for every scan. This was a display/calculation bug — likely the
+    confidence was already multiplied by 100 somewhere upstream and then the
+    display code multiplied by 100 again, capping it at 100%.
+  - That bug was reverted when other code was reverted/updated. The current
+    32.x% display is the correct real output.
+
+useFallback THRESHOLD
+  - Set at 0.75 in _confidenceThreshold.
+  - Since the model currently outputs ~32% confidence on most real receipts,
+    useFallback is always true → every scan goes through the Groq LLM.
+  - This is actually fine as a design choice: use the classifier only to pick
+    the correct sub-parser, and always refine with Groq for better extraction.
+  - If you want to fix the confidence: retrain on OCR-like text (noisy, with
+    character substitutions) rather than clean receipt text.
+
+
+────────────────────────────────────────────────────────────────────────────────
+2. RECEIPT PARSER — WHAT IT DOES BEFORE GROQ FALLBACK
+────────────────────────────────────────────────────────────────────────────────
+
+FLOW
+  classifier assigns category → sub-parser runs regex patterns on OCR lines
+  → if extractionFailed == true → Groq fallback is called
+
+WHAT EACH SUB-PARSER TRIES TO EXTRACT
+
+  ATM (receipt_parser_service.dart → _parseAtm):
+    - bank name (regex list of known Pakistani banks)
+    - ATM location (line after bank name)
+    - transaction type (withdrawal / transfer / inquiry / deposit)
+    - masked card number (last 4 digits, asterisked)
+    - AMOUNT (from line containing "AMOUNT" keyword)
+    - balance after (from line containing "BALANCE" without asterisks)
+    - STAN / reference number
+    - date + time
+
+  POS Store / POS Fuel (_parsePosStore):
+    - service provider (Paysa, HBL, Meezan, MCB, Bank Alfalah, Keenu, OPay)
+    - merchant name (lines after provider line)
+    - card type (Visa, Mastercard, UnionPay, PayPak)
+    - masked card
+    - TXN / TOTAL AMOUNT
+    - MID, TID, AUTH number, RRN, batch number
+    - invoice number, FBR invoice ID
+    - date + time
+    - Fuel-specific: product name, litres, price per litre
+
+  Food / Restaurant (_parseFood):
+    - vendor name (first meaningful line in top 8)
+    - vendor address (lines after name, before order details)
+    - date + time
+    - order number, order type (dine-in / takeaway / delivery)
+    - items from the item block (qty × name → price columns)
+    - subtotal, tax (GST/VAT), FBR POS fee (Rs 1), discount
+    - total / grand total / net total
+    - cash paid, change due
+    - payment method
+    - FBR invoice ID, NTN, invoice number
+
+  Grocery (_parseGrocery):
+    - vendor name (first non-noise line)
+    - date + time
+    - invoice number, cashier name, payment method
+    - NTN (7 digits-1 digit format), STRN
+    - items from item block
+    - subtotal, FBR POS fee, tax (GST)
+    - grand total / net total
+    - cash paid, change due
+    - FBR invoice ID, total savings ("you saved")
+
+  Store / Retail (_parseStore):
+    - vendor name + address (first 5 lines)
+    - sub-category: pharmacy / clothing / shoes / books / general
+      (detected by keyword regex: drug license, khaadi, bata, etc.)
+    - date + time
+    - invoice number, cashier name, payment method
+    - NTN, STRN
+    - items from item block
+    - subtotal, tax, FBR POS fee, discount
+    - total / net total / grand total / payable
+    - cash paid, change due
+    - FBR invoice ID
+
+WHAT TRIGGERS THE GROQ FALLBACK (extractionFailed = true)
+  - ATM:     amount is null
+  - POS:     amount is null
+  - Food:    total is null AND items list is empty
+  - Grocery: grandTotal is null
+  - Store:   total is null AND items list is empty
+
+  So the minimum the parser must find to avoid fallback:
+    ATM/POS  → just the transaction amount
+    Food/Store → just the grand total OR at least one item line
+    Grocery  → just the grand total
+
+  Everything else (date, vendor name, NTN, items, etc.) is extracted as a bonus
+  but does NOT affect whether the fallback is triggered.
+
+GROQ FALLBACK (fallback_service.dart)
+  - Called with: full OCR text + category label from classifier
+  - Model: llama-3.3-70b-versatile on Groq (free, ~14,400 req/day)
+  - Two-tier: full 20-field prompt first → if still extractionFailed,
+    retries with minimal 5-field prompt (category, vendor, total, date, payment)
+  - Handles OCR noise explicitly ("AlJTH" → "AUTH", "AMOUNI" → "AMOUNT")
+  - Returns same ParsedReceipt structure as the local parser
+
+
+────────────────────────────────────────────────────────────────────────────────
+3. MLKIT OCR — PREPROCESSING AND VISIBILITY
+────────────────────────────────────────────────────────────────────────────────
+
+WHAT MLKIT DOES INTERNALLY (you cannot see or control this)
+  - Automatic deskewing (rotates tilted text straight)
+  - Binarization (converts to black/white for text detection)
+  - Noise reduction (removes speckle/grain)
+  - Perspective correction (partial unfolding of curved pages)
+  - Layout analysis (groups characters → words → lines → blocks)
+  All of this happens inside the native ML Kit SDK. The processed image is
+  never returned to Dart — you only get the recognized text output.
+
+CAN PREPROCESSING PIPELINES HELP WITH MLKIT?
+  Short answer: rarely, and easily makes things worse.
+
+  What the previous mlkit_preprocessor.dart did:
+    downscale → grayscale → contrast stretch → unsharp mask (via compute())
+  This was reverted because it worsened OCR output. The reason:
+    ML Kit applies its own binarization internally. If you binarize or
+    heavily threshold the image before passing it, you destroy the grayscale
+    gradient information ML Kit relies on for its own binarization step.
+    Double-processing produces worse results than single-processing.
+
+  Cases where external preprocessing genuinely helps ML Kit:
+    1. MILD unsharp mask (sharpening radius ≤ 1px, strength 0.3–0.5)
+       → helps on genuinely blurry or out-of-focus photos
+    2. MILD contrast boost (CLAHE or simple linear stretch)
+       → helps on very flat, low-contrast receipts (thermal printer fading)
+    3. Downscaling only if image > 4000px wide
+       → ML Kit has an internal limit; oversized images are auto-scaled
+          but may lose fine detail — pre-scaling to ~2000px is safe
+    4. Color → grayscale conversion (safe, no information loss for text)
+
+  What never helps and usually hurts:
+    - Hard binarization (Otsu / adaptive threshold) before ML Kit
+    - Heavy noise filtering (Gaussian blur) — removes thin strokes
+    - Aggressive sharpening (high radius) — amplifies noise
+    - Upscaling — ML Kit does not benefit from interpolated pixels
+
+  Recommended approach if you want to try again:
+    Apply ONLY mild sharpening (unsharp mask: radius 0.8, amount 0.4) and
+    skip everything else. Do NOT binarize. Test on 10+ real photos.
+
+CAN YOU SEE THE PREPROCESSED IMAGE?
+  - You cannot see what ML Kit sees internally.
+  - You CAN see the original image you pass to ML Kit:
+    → The upload zone already shows it (Image.file(_selectedImage)).
+  - If you implement custom preprocessing and want to verify it before
+    passing to ML Kit: save the preprocessed bytes as a temp File, then
+    display it in the upload zone alongside the original. This is useful
+    for debugging but not needed in production.
+  - To judge OCR quality, check the "Extracted Text" card on the upload
+    screen — good OCR output will have clean lines and correct characters.
+
+
+────────────────────────────────────────────────────────────────────────────────
+4. SQLITE DATABASE — WHAT'S DONE, HOW, WHAT'S LEFT OUT
+────────────────────────────────────────────────────────────────────────────────
+
+PACKAGE
+  sqflite (already in pubspec.yaml). Works on Android and iOS out of the box.
+  No setup required beyond adding the dependency.
+
+HOW IT'S INITIALIZED
+  DatabaseService is a singleton (DatabaseService.instance).
+  On first access, openDatabase() creates the file at:
+    Android: /data/user/0/<package>/databases/receipt_iq.db
+  Version 1 schema is created via onCreate callback.
+
+CURRENT SCHEMA (2 tables)
+
+  receipts
+  ┌─────────────────────────────────────────────────────────────┐
+  │ id           TEXT      PRIMARY KEY                          │
+  │ merchantName TEXT      NOT NULL                             │
+  │ date         TEXT      ISO-8601 datetime                    │
+  │ totalAmount  REAL      NOT NULL                             │
+  │ category     TEXT      NOT NULL                             │
+  │ imagePath    TEXT      nullable — full path to image file   │
+  │ notes        TEXT      nullable                             │
+  │ createdAt    TEXT      ISO-8601 — used for sort order       │
+  └─────────────────────────────────────────────────────────────┘
+
+  receipt_items
+  ┌─────────────────────────────────────────────────────────────┐
+  │ id           INTEGER   PRIMARY KEY AUTOINCREMENT            │
+  │ receiptId    TEXT      FK → receipts(id) ON DELETE CASCADE  │
+  │ name         TEXT      NOT NULL                             │
+  │ quantity     REAL      NOT NULL                             │
+  │ price        REAL      NOT NULL   (unit price)              │
+  │ totalPrice   REAL      NOT NULL                             │
+  └─────────────────────────────────────────────────────────────┘
+
+WHAT IS IMPLEMENTED
+  - insertReceipt(receipt) — inserts receipt + all items
+  - updateReceipt(receipt) — updates the 8 schema columns only
+  - deleteReceipt(id) — deletes receipt; CASCADE removes its items
+  - getAllReceipts() — returns all receipts ordered by createdAt DESC,
+    each with items fetched from receipt_items
+  - getReceiptsByDateRange(start, end) — filtered by date column
+  - getTotalSpending() — SUM of all totalAmount values
+  - getReceiptCount() — COUNT of all receipts
+  - getSpendingInRange(start, end) — SUM within a date range
+  - getSpendingByCategory() — GROUP BY category with SUM
+  - seedIfEmpty() — inserts 10 sample receipts on first launch only
+  - DashboardScreen reads live data from these methods (not hardcoded)
+
+WHAT IS NOT STORED (Receipt model has 20+ fields, DB stores 8)
+  Fields in the Dart Receipt model that are NOT persisted to SQLite:
+    rawOcrText       — the full OCR text output
+    vendorAddress    — parsed street address
+    receiptTime      — HH:MM:SS time string
+    subtotal         — pre-tax amount
+    tax              — tax / GST amount
+    fbrPosFee        — FBR POS Rs 1 government fee
+    discount         — discount amount
+    cashPaid         — cash tendered
+    changeDue        — change returned
+    paymentMethod    — cash / debit / credit
+    fbrInvoiceId     — FBR digital invoice ID
+    ntn              — National Tax Number
+    invoiceNumber    — merchant invoice/receipt number
+    syncStatus       — placeholder for cloud sync state
+
+  These are visible in the upload screen's parsed receipt card but
+  disappear after the session ends. They are not stored in the DB.
+
+WHAT'S LEFT OUT / FUTURE WORK
+  1. SCHEMA EXPANSION
+     To persist the 14 missing fields above, you need a DB migration:
+       version: 2, onUpgrade: adds new columns via ALTER TABLE.
+     Without this, the data is lost after the upload session.
+
+  2. NO SEARCH INDEX
+     getAllReceipts() loads all rows and filters in Dart. For large datasets
+     (hundreds of receipts), a SQLite FTS5 table or an index on merchantName
+     and date would be faster.
+
+  3. NO BUDGET TABLES
+     There's no table for budget limits per category or per month.
+
+  4. NO TAGS / LABELS
+     No many-to-many receipt-to-tag relationship.
+
+  5. NO CLOUD SYNC
+     syncStatus field exists in the model but nothing writes to a backend.
+     All data is local and lost if the app is uninstalled.
+
+  6. NO ANALYTICS QUERIES
+     Monthly trend (spending per month), per-vendor totals, etc. are not
+     implemented as DB queries. Dashboard only shows total and category split.
+
+  7. NO CSV/PDF EXPORT FROM DB
+     The classifier accuracy screen has a CSV export for test results.
+     There's no export of the receipt database itself.
+
+
+────────────────────────────────────────────────────────────────────────────────
+5. AUTHENTICATION — WHAT'S DONE, HOW, WHAT'S LEFT OUT
+────────────────────────────────────────────────────────────────────────────────
+
+PACKAGE + SETUP
+  - firebase_auth + google-services.json (Android)
+  - firebase.json + lib/firebase_options.dart (FlutterFire CLI generated)
+  - Firebase project initialized via FlutterFire CLI
+
+HOW IT WORKS (the flow)
+
+  App start
+    └─ main.dart initializes Firebase, then runs MaterialApp
+         └─ AuthWrapper (StreamBuilder on FirebaseAuth.instance.authStateChanges())
+               ├─ stream is null / loading → SplashScreen / CircularProgressIndicator
+               ├─ user == null → LoginScreen
+               └─ user != null → HomeScreen
+
+  Login (login_screen.dart)
+    - Email + password TextFormFields with validation
+    - On submit: FirebaseAuth.instance.signInWithEmailAndPassword(email, password)
+    - On success: authStateChanges stream emits user → AuthWrapper rebuilds →
+      HomeScreen is shown automatically
+    - On error: SnackBar with Firebase error message
+
+  Logout (home_screen.dart drawer)
+    - FirebaseAuth.instance.signOut()
+    - authStateChanges stream emits null → AuthWrapper shows LoginScreen
+    - No navigation.pop() needed — the stream handles the redirect
+
+  Session persistence
+    - Firebase Auth SDK persists the token to SharedPreferences automatically
+    - On cold start, authStateChanges emits the saved user → goes straight to HomeScreen
+    - Token refresh (every hour) handled by Firebase SDK transparently
+
+WHAT IS IMPLEMENTED
+  - Email + password login
+  - Automatic redirect after login / logout via StreamBuilder
+  - Session persistence across cold starts
+  - Logout from drawer
+
+WHAT IS NOT IMPLEMENTED
+
+  1. REGISTRATION SCREEN
+     There is no sign-up screen. Users can only log in with accounts
+     pre-created in the Firebase console. To add sign-up: call
+     FirebaseAuth.instance.createUserWithEmailAndPassword(email, password).
+
+  2. FORGOT PASSWORD / RESET
+     No "Forgot password?" link. To add: call
+     FirebaseAuth.instance.sendPasswordResetEmail(email: email).
+
+  3. GOOGLE SIGN-IN
+     Only email/password. Adding Google Sign-In requires google_sign_in
+     package + SHA-1 fingerprint registered in Firebase console.
+
+  4. USER PROFILE
+     The welcome card shows "Welcome back!" but does not show the logged-in
+     user's name or email. FirebaseAuth.instance.currentUser.displayName
+     and .email are available but not displayed.
+
+  5. PER-USER DATA ISOLATION
+     The SQLite database is completely local and shared across all users
+     who log in on the same device. Receipts are not tied to a Firebase UID.
+     If user A logs in on a device previously used by user B, they see B's
+     receipts. To fix: add a userId column to the receipts table and filter
+     by FirebaseAuth.instance.currentUser!.uid.
+
+  6. EMAIL VERIFICATION
+     After registration (when added), you should call
+     user.sendEmailVerification() and check user.emailVerified before
+     allowing access to HomeScreen.
+
+  7. BIOMETRIC / PIN LOGIN
+     Not implemented. Requires local_auth package.
+
+  8. ACCOUNT DELETION
+     Not implemented. Requires FirebaseAuth.instance.currentUser!.delete()
+     (user must have recently authenticated for this to succeed).
+
+  9. SESSION TIMEOUT
+     Firebase tokens expire and auto-refresh. There is no app-level idle
+     timeout that forces re-login after inactivity.
+
+
+────────────────────────────────────────────────────────────────────────────────
+6. CLASSIFIER DEBUG TOOLING — HOW IT WORKS AND HOW TO REMOVE IT
+────────────────────────────────────────────────────────────────────────────────
+
+OVERVIEW
+  Two separate debug tools were added to inspect classifier output without
+  the Groq fallback interfering. Both are isolated and independently removable.
+
+SHARED FOUNDATION — classifyAll()
+  receipt_classifier_service.dart was refactored so:
+    - classifyAll(String ocrText) → Map<String, double>
+        Runs TF-IDF + TFLite inference once, returns all 6 categories sorted
+        by probability descending (highest first).
+    - classify(String ocrText) → ClassificationResult
+        Now calls classifyAll() internally and wraps the top entry.
+        No duplicate inference. Same output as before.
+    - confidenceThreshold = 0.75 is now public static so other files can
+      reference it without hardcoding the magic number.
+
+TOOL 1 — UPLOAD SCREEN DEBUG CARD (phone, debug builds only)
+  What it does:
+    After OCR runs on a scanned receipt, a grey card appears between the
+    "Extracted Text" card and the "Parsed Receipt" card showing all 6
+    category probability bars. The winning category is bold/indigo.
+    Losing categories are grey. Bars are proportional to the softmax score.
+
+  Where it lives:
+    lib/widgets/classifier_debug_card.dart   ← the widget (self-contained)
+    lib/screens/upload_screen.dart           ← calls classifyAll(), passes
+                                               scores to ClassifierDebugCard,
+                                               wrapped in kDebugMode check
+
+  When it appears:
+    Only in debug builds (flutter run). Never in release builds
+    (flutter build apk --release). The kDebugMode constant is evaluated at
+    compile time — the card code is stripped from release binaries entirely.
+
+  State variable added to upload_screen:
+    Map<String, double>? _classifierScores;
+    Reset to null whenever a new image is picked.
+
+  How to remove completely (3 steps, zero risk):
+    1. Delete lib/widgets/classifier_debug_card.dart
+    2. In upload_screen.dart: remove the import line for classifier_debug_card
+    3. In upload_screen.dart: remove the _classifierScores field declaration
+       and the 5-line kDebugMode block in the build() method
+    The classifyAll() call in upload_screen can stay (it feeds classification
+    anyway) or be replaced back with _classifier.classify(ocrText).
+
+TOOL 2 — ACCURACY SCREEN TAP-TO-INSPECT (Windows desktop only)
+  What it does:
+    After running the 76-image batch test (flutter run -d windows), each row
+    in the Detailed Results table has a magnifying-glass icon on the right.
+    Tapping it opens a bottom sheet showing:
+      - The actual receipt image (Image.file from the hardcoded Windows path)
+      - All 6 probability bars (reuses ClassifierDebugCard)
+      - The full OCR text that was fed to the classifier (selectable/copyable)
+
+  Why Windows only:
+    The 76 test images live at D:\receipt_project\Parser testing sample\images
+    on your PC. That path does not exist on Android. Running the accuracy
+    screen on the phone results in hasError=true for all 76 images.
+    Always run it with: flutter run -d windows
+
+  Changes made to classifier_accuracy_screen.dart:
+    _TestEntry got two new fields:
+      Map<String, double> allScores = {};   ← all 6 scores from classifyAll()
+      String? ocrText;                      ← raw ML Kit output for that image
+    _runTest() now calls classifyAll() instead of classify() and stores both.
+    _buildResultsTable() got a 6th column with an InkWell inspect icon.
+    _showInspector(_TestEntry entry) added — opens the DraggableScrollableSheet.
+
+  How to remove (if you want to strip it back to the original accuracy screen):
+    1. Delete import for classifier_debug_card.dart at the top of the file
+    2. Remove allScores and ocrText fields from _TestEntry
+    3. In _runTest(): replace the classifyAll() block with the original
+         final result = _classifier.classify(recognized.text);
+         entry.predictedCategory = result.category;
+         entry.confidence = result.confidence;
+    4. Remove the _showInspector() method
+    5. In _buildResultsTable(): revert columnWidths back to 5 columns,
+       remove the '' header, remove the inspect icon cell from each row
+
+WHAT THE CLASSIFIER CONFIDENCE NUMBER ACTUALLY MEANS
+  - The classifier outputs 6 softmax probabilities summing to exactly 100%.
+  - The winning category's probability is shown as the "confidence".
+  - 32% on a 6-class problem means the model is about 2× more confident
+    than random guessing (random = 16.7%). It has a signal but is uncertain.
+  - useFallback triggers at < 75%. Since real phone OCR gives ~32%,
+    the Groq fallback runs on virtually every receipt. This is intentional:
+    the classifier picks the sub-parser (atm/food/grocery/etc.) and Groq
+    does the field extraction.
+  - To see the classifier working without Groq interfering:
+      Phone:   scan a receipt → read the debug card bars
+      Windows: run accuracy screen → tap any processed row → inspect panel
+
+
+────────────────────────────────────────────────────────────────────────────────
+END OF NOTES
+================================================================================

@@ -939,7 +939,7 @@ class ReceiptParserService {
 
       // Financial — last occurrence wins
       if (RegExp(
-        r'\b(?:sub[-\s]?total|gross\s+total|value\s+excl|total\s+excl(?:usive)?)\b',
+        r'\b(?:sub[-\s]?total|gross\s+total|value\s+excl|total\s+excl(?:usive)?(?:\s+of\s+(?:tax|GST|VAT))?)\b',
         caseSensitive: false,
       ).hasMatch(line)) {
         final a = _extractAmountFromLine(line) ?? _peekNextAmount(lines, i);
@@ -1127,6 +1127,40 @@ class ReceiptParserService {
   ParsedItem? _parseItemLine(String line) {
     if (line.length < 3) return null;
     if (RegExp(r'^[-=*.]{3,}$').hasMatch(line)) return null;
+
+    // Khaadi / branded clothing item codes: "DD-DD-XXXXX VARIANT QTY PRICE DISC TOTAL"
+    if (RegExp(r'^\d{2}-\d{2}-').hasMatch(line)) {
+      final parts = line.trim().split(RegExp(r'\s+'));
+      final amounts = <double>[];
+      int nameEnd = parts.length;
+      for (int j = parts.length - 1; j >= 0; j--) {
+        final a = _parseAmount(parts[j]);
+        if (a != null) {
+          amounts.insert(0, a);
+          nameEnd = j;
+        } else {
+          break;
+        }
+      }
+      if (amounts.isNotEmpty && amounts.last > 0 && nameEnd > 0) {
+        final name = parts.sublist(0, nameEnd).join(' ').trim();
+        final total = amounts.last;
+        double qty = 1.0;
+        double unitPrice = total;
+        if (amounts.length >= 4) {
+          qty = amounts[0] < 100 ? amounts[0] : 1.0;
+          unitPrice = amounts[1];
+        } else if (amounts.length == 3) {
+          qty = amounts[0] < 100 ? amounts[0] : 1.0;
+          unitPrice = amounts[1];
+        } else if (amounts.length == 2) {
+          unitPrice = amounts[0];
+        }
+        if (name.isNotEmpty) {
+          return ParsedItem(name: name, quantity: qty, unitPrice: unitPrice, itemTotal: total);
+        }
+      }
+    }
 
     // Strip currency prefixes before column-splitting
     final cleaned = line

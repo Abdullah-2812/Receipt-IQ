@@ -21,7 +21,7 @@ class ReceiptClassifierService {
   static const _vocabAsset = 'assets/ml/tfidf_vocab.json';
   static const _categoriesAsset = 'assets/ml/categories.json';
   static const _vectorSize = 3000;
-  static const _confidenceThreshold = 0.75;
+  static const double confidenceThreshold = 0.75;
 
   Interpreter? _interpreter;
   Map<String, int> _vocabulary = {};
@@ -53,23 +53,26 @@ class ReceiptClassifierService {
     _categories = (data['classes'] as List).cast<String>();
   }
 
-  ClassificationResult classify(String ocrText) {
+  /// Returns all 6 categories sorted by probability descending.
+  Map<String, double> classifyAll(String ocrText) {
     if (!_isInitialized) {
-      throw StateError('Call initialize() before classify().');
+      throw StateError('Call initialize() before classifyAll().');
     }
+    final scores = _runInference(_buildTfidfVector(ocrText));
+    final entries = [
+      for (int i = 0; i < _categories.length; i++)
+        MapEntry(_categories[i], scores[i]),
+    ]..sort((a, b) => b.value.compareTo(a.value));
+    return Map.fromEntries(entries);
+  }
 
-    final vector = _buildTfidfVector(ocrText);
-    final scores = _runInference(vector);
-
-    int maxIdx = 0;
-    for (int i = 1; i < scores.length; i++) {
-      if (scores[i] > scores[maxIdx]) maxIdx = i;
-    }
-
+  ClassificationResult classify(String ocrText) {
+    final scores = classifyAll(ocrText);
+    final top = scores.entries.first;
     return ClassificationResult(
-      category: _categories[maxIdx],
-      confidence: scores[maxIdx],
-      useFallback: scores[maxIdx] < _confidenceThreshold,
+      category: top.key,
+      confidence: top.value,
+      useFallback: top.value < confidenceThreshold,
     );
   }
 
@@ -96,6 +99,9 @@ class ReceiptClassifierService {
       vector[idx] = (tf * _idfWeights[idx]).toDouble();
     }
 
+    final nonZero = vector.where((v) => v != 0).length;
+    print('[TFIDF] tokens=${tokens.length}  vocab_hits=$nonZero / $_vectorSize');
+
     return vector;
   }
 
@@ -114,7 +120,10 @@ class ReceiptClassifierService {
 
     _interpreter!.run(input, output);
 
-    return _softmax(output[0]);
+    final rawSum = output[0].reduce((a, b) => a + b);
+    print('[MODEL] raw_output=${output[0].map((v) => v.toStringAsFixed(4)).toList()}  sum=${rawSum.toStringAsFixed(4)}');
+
+    return output[0]; // model already outputs softmax probabilities
   }
 
   List<double> _softmax(List<double> logits) {
