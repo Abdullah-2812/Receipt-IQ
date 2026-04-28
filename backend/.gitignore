@@ -1,0 +1,30 @@
+# Firebase service account — must never be committed
+serviceAccountKey.json
+
+# Local secrets (DB password etc.) — see app/_secrets.example.py for template
+app/_secrets.py
+
+# Python virtualenv and bytecode
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment files
+.env
+.env.*
+
+# AI tooling
+.claude/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Migration backups (created automatically by migrate_v3.sql)
+*_backup_v*.sql
+
+# OS
+.DS_Store
+Thumbs.db

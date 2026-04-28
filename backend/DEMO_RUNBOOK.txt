@@ -1,0 +1,146 @@
+================================================================
+  ReceiptIQ Demo Runbook — commands you'll need on the day
+================================================================
+
+
+PRE-DEMO CHECKLIST
+------------------
+  [ ] Laptop on AC power, sleep disabled
+       Settings -> System -> Power & sleep -> Screen and sleep -> Never
+  [ ] WiFi connected (laptop and demo phone on same SSID)
+  [ ] PostgreSQL service running
+  [ ] uvicorn server running
+  [ ] If using ngrok: tunnel started and APK rebuilt with public URL
+  [ ] Demo phone fully charged
+  [ ] Demo data reset (see below)
+
+
+START THE BACKEND
+-----------------
+  Open PowerShell.
+
+  cd D:\FlutterProjects\receipt_iq\backend
+  .\venv\Scripts\activate
+  uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+  Watch for:
+    INFO: Uvicorn running on http://0.0.0.0:8000
+    INFO: Application startup complete.
+
+  Keep this window visible during demo — every API call appears here.
+
+
+CONNECT TO POSTGRES (psql)
+--------------------------
+  Open a SECOND PowerShell window (keep uvicorn running in the first).
+
+  psql -U postgres -d receipt_iq
+
+  Password when prompted: <your local postgres password>
+
+  Useful psql commands (start with backslash):
+    \dt              List all tables
+    \d receipts      Show columns of receipts table
+    \d receipt_items Show columns of receipt_items table
+    \x               Toggle expanded mode (long rows look better)
+    \q               Quit
+
+
+COMMON QUERIES TO RUN DURING DEMO
+---------------------------------
+  -- Show all active receipts for a user (replace UID with real one)
+  SELECT id, merchant_name, category, total_amount
+  FROM receipts
+  WHERE user_id = 'YOUR_FIREBASE_UID' AND deleted_at IS NULL
+  ORDER BY date DESC;
+
+  -- Show how many users + how many rows each has (multi-tenant proof)
+  SELECT user_id, COUNT(*) FROM receipts GROUP BY user_id;
+
+  -- Show soft-deleted vs active counts
+  SELECT
+    COUNT(*) FILTER (WHERE deleted_at IS NULL) AS active,
+    COUNT(*) FILTER (WHERE deleted_at IS NOT NULL) AS soft_deleted
+  FROM receipts;
+
+  -- Find a specific receipt
+  SELECT id, merchant_name, sync_status, deleted_at
+  FROM receipts
+  WHERE id = 'seed_2';
+
+
+RESET DEMO DATA (clean slate before presenting)
+-----------------------------------------------
+  WARNING: this nukes all data. Run only when you want a fresh start.
+
+  In psql, run:
+    DELETE FROM receipt_items;
+    DELETE FROM receipts;
+
+  Then on each demo phone:
+    1. Long-press the ReceiptIQ icon -> Uninstall
+    2. Reinstall (flutter run, or sideload APK)
+    3. Login -> SyncService.handleLogin sees no saved UID -> wipes
+       SQLite (already empty) -> fullSync pulls fresh data from server
+    4. seedIfEmpty fires (server returned 0 rows -> SQLite still empty)
+       and creates the 10 demo seeds
+    5. pushPending sends the seeds to PostgreSQL -> demo data ready
+
+
+ADB COMMANDS (force-clear app data on a phone)
+----------------------------------------------
+  Useful when Android Auto Backup interferes with fresh-install testing.
+
+  Connect phone via USB, enable USB debugging.
+
+  adb devices                                  List connected devices
+  adb shell pm clear com.example.receipt_iq    Wipe app data, keeps APK
+  adb uninstall com.example.receipt_iq         Full uninstall
+
+
+CHECK SERVER LOGS DURING DEMO
+-----------------------------
+  Every API request prints in the uvicorn terminal as one line:
+
+    INFO: 192.168.x.x:port - "METHOD /path HTTP/1.1" STATUS
+
+  Status codes worth knowing:
+    200 OK         Success
+    401 Unauthorized  Firebase token invalid or expired (rare)
+    500             Server error — paste the traceback that follows
+
+
+COMMON TROUBLESHOOTING
+----------------------
+  "phone can't reach server"
+    Check both are on the same WiFi.
+    On phone browser, open http://<laptop-ip>:8000 — should see
+    {"status":"ReceiptIQ backend running"}.
+
+  "cold start takes >10 seconds"
+    Laptop is suspending uvicorn. Disable Windows sleep.
+
+  "app shows wrong user's data"
+    Logout, log back in. handleLogin will wipe and re-pull.
+
+  "receipts show duplicates"
+    DB version 3 migration should have cleaned these up. If you see
+    duplicates, force-clear app data via adb and reinstall.
+
+  "fresh install still has old data"
+    Android Auto Backup is restoring from Google Drive. Make sure
+    AndroidManifest.xml has android:allowBackup="false" AND that the
+    APK was rebuilt after that change.
+
+
+KEY PROJECT PATHS
+-----------------
+  Flutter app:      D:\FlutterProjects\receipt_iq
+  FastAPI backend:  D:\FlutterProjects\receipt_iq\backend
+  This runbook:     D:\FlutterProjects\receipt_iq\backend\DEMO_RUNBOOK.txt
+  Architecture doc: D:\FlutterProjects\receipt_iq\backend\PROJECT_OVERVIEW.txt
+  Sync service:     lib\services\sync_service.dart
+  Sync URL config:  lib\services\sync_service.dart -> _baseUrl
+
+
+================================================================

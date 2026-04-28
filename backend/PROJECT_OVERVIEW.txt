@@ -1,0 +1,350 @@
+================================================================
+  ReceiptIQ Backend — Project Overview
+================================================================
+
+WHAT THIS IS
+------------
+A REST API backend for the ReceiptIQ Flutter app.
+Built with FastAPI (Python) + PostgreSQL database.
+Runs on your laptop. Phone connects to it over WiFi.
+
+
+TECH STACK
+----------
+  Language   : Python 3.13
+  Framework  : FastAPI 0.136
+  Database   : PostgreSQL 18 (running on D:\PostgreSQL\18)
+  Auth       : Firebase JWT verification (reuses Flutter app's Firebase Auth)
+  Server     : Uvicorn (ASGI server that runs FastAPI)
+
+
+PACKAGES INSTALLED
+------------------
+  fastapi          - Web framework, handles HTTP requests/responses
+  uvicorn          - Runs the FastAPI app as a server
+  psycopg2-binary  - PostgreSQL driver, lets Python talk to PostgreSQL
+  python-jose      - JWT token handling
+  firebase-admin   - Verifies Firebase Auth tokens from the Flutter app
+
+
+FOLDER STRUCTURE
+----------------
+  D:\FlutterProjects\receipt_iq\backend\
+  |
+  |-- venv\                    Python virtual environment
+  |                            All packages live here, isolated from system
+  |
+  |-- app\
+  |   |-- main.py              FastAPI app entry point, registers all routers
+  |   |-- database.py          PostgreSQL connection setup
+  |   |-- models.py            SQLAlchemy table definitions (receipts, items)
+  |   |-- schemas.py           Pydantic request/response shapes (what JSON looks like)
+  |   |-- auth.py              Firebase token verification middleware
+  |   |
+  |   |-- routers\
+  |       |-- receipts.py      Receipt CRUD endpoints (create, read, update, delete)
+  |       |-- analytics.py     Aggregation queries (spending by category, totals)
+  |
+  |-- migrate_v3.sql           One-shot SQL migration v2 -> v3 (composite PK)
+  |-- requirements.txt         List of all packages (for redeploying elsewhere)
+  |-- PROJECT_OVERVIEW.txt     This file (architecture + sync design)
+  |-- DEMO_RUNBOOK.txt         Commands you'll need on the day of defense
+
+
+API ENDPOINTS
+-------------
+  POST   /receipts/sync              Bulk push receipts from phone to server
+  GET    /receipts?since=<datetime>  Pull only receipts updated after timestamp (delta sync)
+  PUT    /receipts/{id}              Update a single receipt
+  DELETE /receipts/{id}              Soft delete (sets deleted_at, never hard deletes)
+  GET    /analytics/summary          Server-side GROUP BY queries (fast aggregations)
+
+
+HOW AUTH WORKS
+--------------
+  1. User logs in on Flutter app via Firebase Auth
+  2. Firebase gives the phone a JWT token
+  3. Flutter sends that token in every API request header:
+       Authorization: Bearer <token>
+  4. FastAPI middleware (auth.py) verifies the token using firebase-admin
+  5. Extracts user UID from token — used to filter that user's receipts only
+  6. No custom login system needed — Firebase handles it
+
+
+SYNC DESIGN (OFFLINE-FIRST)
+---------------------------
+  Local SQLite = primary database. App always reads from it. Works fully offline.
+  PostgreSQL   = backup + multi-device sync. Secondary.
+
+  syncStatus column on each local row tracks where the row stands:
+    synced          Local matches server. Steady state.
+    local_only      Created offline, never sent. Push on next sync.
+    pending_update  Edited offline, server has stale copy. Push on next sync.
+    pending_delete  User deleted, but server call hasn't confirmed yet. Retry on next sync.
+
+  Full sync (runs on login + auth state changes):
+    1. pushPending()
+       a. Find all rows with syncStatus = pending_delete -> DELETE /receipts/{id}.
+          On success, hard-delete from SQLite.
+          On failure (offline), leave the row alone for the next retry.
+       b. Find all rows with syncStatus = local_only / pending_update ->
+          POST /receipts/sync as a batch. On success mark them synced.
+    2. pullDelta()
+       GET /receipts?since=<last_synced_at>. Server returns every row whose
+       updated_at is newer than that timestamp, including soft-deleted ones.
+       For each row:
+         - deleted_at != NULL  -> hard-delete the local copy
+         - deleted_at == NULL  -> upsert into SQLite as synced
+       Save last_synced_at = now() so the next pull only fetches new changes.
+
+  Delete lifecycle (offline-resilient):
+    1. UI optimistically removes the row from the in-memory list.
+    2. SyncService.deleteFromServer(id):
+       a. Mark the SQLite row syncStatus = pending_delete (still in the table,
+          but excluded from UI queries by default).
+       b. Try DELETE /receipts/{id}.
+          On success  -> hard-delete from SQLite.
+          On failure  -> leave row as pending_delete; next pushPending retries.
+    3. If the user taps "Restore" inside the snackbar window, insertReceipt
+       overwrites the row with syncStatus = local_only and pushPending re-syncs
+       it. The server's ON CONFLICT (id) DO UPDATE clears deleted_at = NULL
+       so the receipt is "un-deleted" cleanly.
+
+  Soft delete on server:
+    DELETE /receipts/{id} sets deleted_at = now() instead of removing the row.
+    The row stays forever so other devices can mirror the deletion via pullDelta.
+    Prevents ghost-record bug (deleted receipt reappearing after reinstall).
+    Periodic cleanup possible via:
+      DELETE FROM receipts WHERE deleted_at < NOW() - INTERVAL '90 days';
+
+  Why getAllReceipts has a default filter:
+    UI queries hide pending_delete rows so deletes look instant even before the
+    server confirms. Sync-side code passes includeDeleted: true to see them.
+
+  Conflict resolution:
+    Last write wins (acceptable for personal expense tracker).
+    POST /receipts/sync uses ON CONFLICT (user_id, id) DO UPDATE so
+    concurrent writes from two devices are safely upserted. Composite
+    PK ensures no cross-user pollution. The phone whose pushPending
+    completes last is the winner; the other phone's local edit gets
+    overwritten on its next pullDelta.
+
+  UID-aware login (multi-account on one device):
+    SyncService.handleLogin(uid) runs every time Firebase emits an
+    authenticated user:
+      1. Read saved UID from SharedPreferences (key: last_user_uid).
+      2. If saved == new: keep SQLite, do delta pull (fast resume).
+      3. If saved != new (different account, or first-ever login):
+            wipeAllReceipts() -> clear last_synced_at -> save new UID
+            -> fullSync (push nothing local, pull all active server rows).
+    Logout itself is non-destructive — just FirebaseAuth.signOut().
+    SQLite is preserved across logout so re-logging in as the same
+    user is instant. Cleanup happens lazily on next *different* login.
+
+  First-sync gate (prevents seedIfEmpty from racing handleLogin):
+    SyncService holds a Completer<void> _firstSyncCompleter that opens
+    when the first handleLogin completes. ReceiptsListScreen._loadReceipts
+    awaits SyncService.waitForFirstSync() before calling seedIfEmpty(),
+    so demo seeds only fire if SQLite is *still* empty after pullDelta —
+    i.e., a brand-new user with no server data. Without this gate, the
+    seeder could insert seed_1..seed_10 as local_only and the next
+    pushPending would resurrect deleted seeds on the server.
+
+  Validated test scenarios:
+    Single device (Phone A):
+      1. Scan -> POST /receipts/sync -> server stores sync_status='synced'.
+      2. Plain delete -> server sets deleted_at, row removed locally.
+      3. Delete + Restore (within 3s snackbar) -> deleted_at returns to NULL.
+      4. Offline delete (server down) + force-close + reopen ->
+         pending_delete persists, retries on next fullSync, deleted_at set.
+      5. Edit -> POST /receipts/sync immediately, server updates merchant.
+      6. Offline edit + force-close + reopen ->
+         pending_update persists, retries on next fullSync.
+      7. Logout/login (same user) -> only delta GET, no wipe.
+
+    Multi-account on one device (Phone A):
+      A. Same-user re-login -> no wipe, delta pull only.
+      B. Different-user login -> SQLite wiped, last_synced_at cleared,
+         full GET /receipts (no since=), only the new user's data appears,
+         zero leakage. Cross-tenant isolation verified via
+         SELECT user_id, COUNT(*) FROM receipts GROUP BY user_id.
+      C. Force-close + reopen (same user) -> delta pull, instant view.
+
+    Multi-device (Phone A + Phone B, same account):
+      D. Phone A scans -> Phone B reopen -> new receipt visible on B.
+      E. Phone A edits   -> Phone B reopen -> edit visible on B.
+      F. Phone A deletes -> Phone B reopen -> row gone on B.
+      G. Both phones offline, both edit same row, both reconnect ->
+         whichever pushed last wins on server. Other phone's local
+         value is overwritten on its next pullDelta. Last-write-wins
+         confirmed end-to-end.
+
+    Fresh install (Phone B):
+      H. Uninstall + flutter run + login (with allowBackup=false manifest
+         AND first-sync gate fix) -> single GET /receipts (no since=),
+         no spurious POST, no resurrected seeds. Earlier attempts without
+         the manifest flag were corrupted by Android Auto Backup
+         restoring stale SQLite + SharedPreferences from Google Drive.
+
+  Known limitations (future improvements):
+    - Tiered storage: keep only current month in SQLite, fetch history on demand
+    - Pre-calculated analytics summaries stored locally for instant charts
+    - Conflict UI: surface concurrent-edit conflicts instead of silent last-write-wins
+
+
+DATABASE
+--------
+  Host     : localhost
+  Port     : 5432
+  Name     : receipt_iq
+  User     : postgres
+  Password : <set locally — see app/database.py / .env>
+  Schema   : v3 (composite PK for multi-tenant isolation)
+
+  Tables:
+    receipts       - 26 columns. PRIMARY KEY (user_id, id) so the same
+                     id can exist for different users without collision.
+    receipt_items  - 7 columns. user_id added in v3 migration.
+                     FOREIGN KEY (user_id, receipt_id) REFERENCES
+                     receipts(user_id, id) ON DELETE CASCADE.
+
+  Schema files:
+    app/schema.sql      Fresh-install schema (idempotent, IF NOT EXISTS).
+    migrate_v3.sql      One-shot migration v2 -> v3 in a transaction.
+                        Adds user_id to receipt_items, backfills it from
+                        the parent receipts row, drops the old single-column
+                        PK and FK, recreates them as composite. Snapshots
+                        existing data into receipts_backup_v2 and
+                        receipt_items_backup_v2 before mutating anything.
+
+  Indexes:
+    idx_receipts_user        ON receipts(user_id)
+    idx_receipts_date        ON receipts(user_id, date)
+    idx_receipts_category    ON receipts(user_id, category)
+    idx_receipts_updated     ON receipts(user_id, updated_at)
+    idx_items_receipt        ON receipt_items(user_id, receipt_id)
+
+
+HOW FLUTTER CONNECTS
+--------------------
+  Same WiFi  : http://192.168.100.47:8000
+  Outside    : Use ngrok -> ngrok http 8000 -> gives public HTTPS URL
+
+
+RECENT POST-VALIDATION FIXES
+----------------------------
+  Local SQLite v3 migration (one-shot dedup):
+    Bumped DatabaseConstants.databaseVersion 2 -> 3. _upgradeDB now runs
+    a dedup query against receipt_items on first launch:
+      DELETE FROM receipt_items WHERE id NOT IN (
+        SELECT MIN(id) FROM receipt_items
+        GROUP BY receiptId, name, quantity, price, totalPrice
+      );
+    Cleans up duplicates left over from the pre-fix insertReceipt bug
+    that didn't delete existing items before inserting fresh ones.
+
+  insertReceipt fix:
+    DatabaseService.insertReceipt now mirrors updateReceipt — explicitly
+    deletes receipt_items rows for the receipt id before inserting fresh
+    ones. SQLite's FK ON DELETE CASCADE only fires when foreign_keys
+    pragma is enabled (off by default in sqflite), so we don't rely on it.
+
+  Edit modal scroll + safe area:
+    receipt_info_screen.dart's edit bottom sheet wraps form in
+    SingleChildScrollView with bottom padding = viewInsets.bottom +
+    padding.bottom + 24. Body of the detail page also wrapped in SafeArea
+    so last item isn't covered by Android system nav bar.
+
+  Currency icon:
+    Switched from Icons.attach_money ($) and Icons.currency_rupee (Indian)
+    to Icons.payments_outlined (neutral money icon). The actual currency
+    text is Rs via NumberFormat.currency(locale: 'en_PK', symbol: 'Rs ').
+
+  Tap-avatar to edit name:
+    DashboardScreen's avatar is now tappable -> dialog -> validates ->
+    FirebaseAuth.currentUser.updateDisplayName(name) + reload() + setState.
+    Persists across all logins because Firebase stores it server-side.
+    Touches no SQLite or PostgreSQL data.
+
+  Auth autofill:
+    Login + signup forms wrapped in AutofillGroup. Email field exposes
+    AutofillHints.username + email; password exposes AutofillHints.password
+    (signup uses .newUsername / .newPassword). After successful auth,
+    TextInput.finishAutofillContext() fires so the OS prompts to save.
+
+
+DEFERRED FOR THE NEXT CHAT
+--------------------------
+  Category naming consolidation:
+    Current ExpenseCategories.categories has 8 labels but the classifier
+    only produces 6 distinct outputs (3 labels — Medicines, Entertainment,
+    Other — are never classifier-set). Better mapping:
+      food      -> Food & Dining
+      grocery   -> Groceries
+      pos_fuel  -> Fuel              (currently "Transportation")
+      pos_store -> Shopping          (also stores "store")
+      store     -> Shopping
+      atm       -> Cash & ATM        (currently "Bills & Utilities")
+      manual    -> Other
+    Requires migration of existing rows on both SQLite (onUpgrade v4)
+    and PostgreSQL (a migrate_v4.sql).
+
+  Field-specific auth errors:
+    Currently login screen shows "Something went wrong" snackbars at the
+    bottom. Modern UX expects errors next to the offending field. Needs
+    per-field error state and refactor of _onLogin / _onSignUp.
+
+  Analytics page (lib/screens/analytics_screen.dart):
+    The GET /analytics/summary endpoint exists and returns total_spending,
+    receipt_count, by_category, by_month (last 6). Page needs to render
+    fl_chart visualizations using this data.
+
+  ngrok / hosted deployment:
+    Currently _baseUrl in sync_service.dart is the LAN IP. For demos to
+    phones outside the laptop's WiFi (faculty's cellular), switch to a
+    reserved-subdomain ngrok URL or deploy to Render/Railway.
+
+  Optional: Claude API for OCR upgrade:
+    Replace Google ML Kit text recognition with Claude vision API for
+    higher accuracy on real-world receipts. Requires Anthropic SDK and
+    handling API keys properly.
+
+
+CLIENT-SIDE BUILD NOTES
+-----------------------
+  Android Auto Backup (CRITICAL):
+    AndroidManifest.xml must contain on the <application> element:
+      android:allowBackup="false"
+      android:fullBackupContent="false"
+    Without these flags, Android backs up SQLite + SharedPreferences to
+    Google Drive and silently restores them on uninstall+reinstall. This
+    breaks the "fresh install" guarantee — restored stale rows can push
+    back to the server and resurrect deleted seeds. Discovered the hard
+    way during Test H (fresh install).
+
+  Sync URL:
+    sync_service.dart -> static const String _baseUrl
+    Set to http://<laptop-LAN-IP>:8000 for local testing on same WiFi.
+    For demos to phones on cellular or other networks, switch to ngrok
+    or a hosted URL (Render / Railway).
+
+  Local SQLite location (Android):
+    /data/data/com.example.receipt_iq/databases/receipt_iq.db
+    Force-clear app data via:
+      adb shell pm clear com.example.receipt_iq
+
+  Snackbar workaround in receipts_list_screen.dart:
+    Auto-dismiss timer is implemented manually with Future.delayed because
+    Flutter's built-in SnackBar timer was not firing on the test device.
+    Uses scaffoldMessengerKey (a global key in main.dart) instead of
+    ScaffoldMessenger.of(context) to bypass IndexedStack-related quirks.
+
+
+TO START THE SERVER
+-------------------
+  cd D:\FlutterProjects\receipt_iq\backend
+  venv\Scripts\activate
+  uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+
+================================================================

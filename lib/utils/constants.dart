@@ -13,7 +13,7 @@ class ApiConfig {
   // Public ngrok URL — works on any network (WiFi, cellular).
   // Tunnel is opened with:
   //   ngrok http --domain=ninetieth-zestfully-lid.ngrok-free.dev 8000
-  // See D:\receipt_iq_backend\NGROK_SETUP.txt for full instructions.
+  // See D:\FlutterProjects\receipt_iq\backend\NGROK_SETUP.txt for full instructions.
   static const String baseUrl = 'https://ninetieth-zestfully-lid.ngrok-free.dev';
 
   // Laptop LAN IP — uncomment for same-WiFi local dev when ngrok is off.

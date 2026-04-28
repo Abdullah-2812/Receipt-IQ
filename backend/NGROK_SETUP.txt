@@ -1,0 +1,212 @@
+================================================================
+  ReceiptIQ ngrok Setup — public URL for off-WiFi demos
+================================================================
+
+
+WHY THIS EXISTS
+---------------
+The Flutter app currently points at http://192.168.100.47:8000,
+which is the laptop's LAN IP on the home WiFi router. That URL only
+works when:
+
+  1. Laptop and demo phone are on the same WiFi network
+  2. The laptop currently holds that exact IP
+  3. The WiFi allows client-to-client traffic (many uni / corporate
+     networks block it, called "client isolation")
+
+For demos to phones on cellular, on a different WiFi, or behind a
+network with client isolation, ngrok exposes the local uvicorn server
+through a public HTTPS URL that any internet-connected phone can hit.
+
+The laptop opens an outbound tunnel to ngrok's edge server. The phone
+hits the public URL. They meet in the middle. Client isolation is
+irrelevant because traffic never goes phone -> laptop directly.
+
+
+CODE CHANGES ALREADY APPLIED
+----------------------------
+The base URL has been lifted out of sync_service.dart into a single
+config class. To swap between LAN and ngrok, edit ONE file:
+
+  lib/utils/constants.dart -> class ApiConfig -> static const baseUrl
+
+Both options live in that file as commented alternatives. Comment one,
+uncomment the other, rebuild the APK.
+
+  Files touched:
+    lib/utils/constants.dart   - new ApiConfig class
+    lib/services/sync_service.dart - now reads ApiConfig.baseUrl
+
+
+ONE-TIME SETUP (do this BEFORE demo day, not on it)
+---------------------------------------------------
+
+Step 1 - Create a free ngrok account
+  Go to:  https://dashboard.ngrok.com/signup
+  Sign up with GitHub or email. Free tier is enough.
+
+Step 2 - Install the Windows binary
+  Download:  https://ngrok.com/download
+  Extract ngrok.exe to a permanent folder, e.g. D:\ngrok\
+  (Optional) Add D:\ngrok\ to PATH so you can run "ngrok" from
+  any PowerShell window. If not, you'll prefix with D:\ngrok\ngrok.exe.
+
+Step 3 - Authenticate the binary
+  From the ngrok dashboard, copy your Auth Token from:
+    https://dashboard.ngrok.com/get-started/your-authtoken
+
+  Then in PowerShell:
+    ngrok config add-authtoken <your-token-here>
+
+  This writes credentials to %USERPROFILE%\AppData\Local\ngrok\ngrok.yml.
+  Done once per machine, never again.
+
+Step 4 - Claim your free static domain
+  Free tier gives you ONE permanent subdomain. Without this you'd get
+  a random URL every restart and the APK would need rebuilding each
+  time. With it, the URL is yours forever.
+
+  Go to:  https://dashboard.ngrok.com/domains
+  Click  "Create Domain" -> "Static Domain"
+  ngrok suggests a domain like:
+    abdullah-receipt-iq.ngrok-free.dev
+  Accept it and write it down.
+
+Step 5 - Test the tunnel
+  Make sure uvicorn is running first:
+    cd D:\FlutterProjects\receipt_iq\backend
+    .\venv\Scripts\activate
+    uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+  In a separate PowerShell window:
+    ngrok http --domain=<your-domain>.ngrok-free.dev 8000
+
+  ngrok will print:
+    Forwarding  https://<your-domain>.ngrok-free.dev -> http://localhost:8000
+
+  Open that HTTPS URL in your laptop's browser. You should see:
+    {"status":"ReceiptIQ backend running"}
+
+  Open it on a phone (any network, including cellular). Same response.
+  If yes -> tunnel works. If timeout -> see Troubleshooting.
+
+Step 6 - Update the Flutter app
+  Edit lib/utils/constants.dart:
+
+    class ApiConfig {
+      // Comment out the LAN line:
+      // static const String baseUrl = 'http://192.168.100.47:8000';
+
+      // Uncomment and update with YOUR domain:
+      static const String baseUrl = 'https://<your-domain>.ngrok-free.dev';
+    }
+
+Step 7 - Rebuild and install the APK
+  cd D:\FlutterProjects\receipt_iq
+  flutter build apk --release
+
+  Output:  build\app\outputs\flutter-apk\app-release.apk
+
+  Sideload to both demo phones:
+    adb install -r build\app\outputs\flutter-apk\app-release.apk
+  Or transfer the APK file and install manually.
+
+Step 8 - Smoke test on a phone
+  - Turn off the phone's WiFi (force cellular) to prove it works
+    independent of LAN.
+  - Open ReceiptIQ, log in.
+  - Watch the uvicorn terminal — you should see lines like:
+      INFO: <ngrok-internal-ip>:port - "GET /receipts HTTP/1.1" 200
+  - Scan a receipt, confirm it appears in psql:
+      SELECT id, merchant_name FROM receipts ORDER BY created_at DESC LIMIT 1;
+  - If all three pass, you're ready for demo day.
+
+
+DEMO DAY USAGE (every time)
+---------------------------
+  1. Disable Windows sleep (already on DEMO_RUNBOOK.txt checklist).
+  2. Start uvicorn (PowerShell window 1).
+  3. Start ngrok (PowerShell window 2):
+       ngrok http --domain=<your-domain>.ngrok-free.dev 8000
+  4. Confirm the "Forwarding" line shows your domain mapped to :8000.
+  5. Open the demo phones, ensure they have ANY internet (WiFi or
+     cellular, doesn't matter). Launch the app.
+
+  Keep both PowerShell windows visible — uvicorn shows API hits,
+  ngrok shows the public URL and a request count.
+
+
+WHAT IF I FORGET TO START NGROK?
+--------------------------------
+The app will fail to sync. Login still works (Firebase Auth doesn't
+need your backend). But push/pull will time out after ~10 seconds
+and print [SYNC] errors in the Flutter console. Start ngrok and the
+next sync attempt succeeds.
+
+
+COSTS, LIMITS, GOTCHAS
+----------------------
+  Cost           Free tier covers this entire project.
+  Static domain  1 free per account. Yours, forever, as long as
+                 you don't delete it from the dashboard.
+  Rate limit     ~120 connections/minute on free tier (was 40 in
+                 the past — check dashboard). Demo will not approach.
+  Latency        +100-300 ms per request (Mumbai/Singapore edge from
+                 Pakistan). Invisible for sync, fine for image uploads.
+  Browser warn   ngrok shows an interstitial page on browser visits to
+                 free-tier URLs. Does NOT affect Dio API calls because
+                 Dio sends a User-Agent that bypasses the warning.
+  Tunnel dies    If laptop sleeps, network drops, or you Ctrl+C ngrok.
+                 Just rerun the ngrok command — same domain, same URL.
+  Cleartext      Switching to HTTPS REMOVES Android's cleartext-traffic
+                 concern, doesn't add one. No manifest changes needed.
+
+
+TROUBLESHOOTING
+---------------
+  "ngrok command not found"
+    Either add ngrok.exe folder to PATH, or run with the full path:
+      D:\ngrok\ngrok.exe http --domain=... 8000
+
+  "ERR_NGROK_4018 (auth required)"
+    You skipped Step 3. Run:
+      ngrok config add-authtoken <your-token>
+
+  "ERR_NGROK_3200 (domain not found)"
+    Domain typo, or you didn't claim it on the dashboard.
+    Check at https://dashboard.ngrok.com/domains.
+
+  Tunnel says "online" but phone gets a connection error
+    a) Confirm uvicorn is actually running (check window 1).
+       The ngrok tunnel can be online while uvicorn is down — ngrok
+       just forwards to a closed port and the phone gets a 502.
+    b) Restart ngrok if it was idle for hours.
+    c) On free tier, only the latest tunnel session for your domain
+       is active. If you started ngrok twice, the first session is dead.
+
+  Phone times out, browser on phone also times out
+    Your university (or wherever you are) may block ngrok-free.dev.
+    Rare but possible. Test from uni WiFi BEFORE demo day. If blocked:
+    fallback to phone-hotspot APK (see backup plan in DEMO_RUNBOOK.txt).
+
+  Phone times out, browser on phone WORKS
+    Stale APK pointing at old _baseUrl. Rebuild and reinstall.
+
+  Sync works for one phone, not the other
+    Check the second phone has the same APK. The "stale APK" trap is
+    easy to fall into when you sideload to one phone and forget the
+    other.
+
+
+REVERTING TO LAN URL
+--------------------
+For at-home development on the same WiFi as the laptop:
+
+  1. Edit lib/utils/constants.dart -> ApiConfig
+  2. Comment the ngrok line, uncomment the LAN line.
+  3. flutter run (no rebuild needed for `flutter run`).
+
+You don't need to stop ngrok — having it running idle costs nothing.
+
+
+================================================================
